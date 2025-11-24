@@ -1,135 +1,114 @@
 #!/bin/bash
 # sync_users.sh
-# Hovedskript for synkronisering av brukere og grupper på tvers av servere.
+# Sentralisert synkronisering av brukere og grupper på tvers av servere.
+# Kjøring: sudo ./sync_users.sh /opt/nordfrakt_data/nordfrakt_tromso.csv
+# Forutsetning: SSH-nøkler fra Tromsø til Harstad/Bodø og sudo uten passord for it_admin.
 
+set -euo pipefail
 
-# --- KONFIGURASJON (KONFIGURACJA) ---
-CSV_FILE="$1"
+# --- KONFIGURASJON ---
+CSV_FILE="${1:-}"
+REMOTE_HOSTS=("server-harstad" "server-bodo")  # Oppdater til faktiske hostnames/IP
+TEMP_PASSWORD="Velkommen2025!"                 # Midlertidig passord ved første innlogging
+PRIMARY_GROUP_MAP=("ledelse" "itlogistikk" "okonomi" "ruteplanlegging" "it_admin")
+LOG_FILE="/var/log/nordfrakt_sync_users.log"
 
-# Liste over fjernservere Bruk hostname eller IP.
-REMOTE_HOSTS=("harstad_server" "bodo_server")
-TEMP_PASSWORD="Velkommen2025!" # Midlertidig passord 
+# --- HJELPEFUNKSJONER ---
+log() { echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"; }
 
-# Sjekk om CSV-filen eksisterer 
-if [ -f "$CSV_FILE" ]; then
-    tr -d '\r' < "$CSV_FILE" > /tmp/temp_clean.csv && mv /tmp/temp_clean.csv "$CSV_FILE"
-else
-    echo "Feil: CSV-filen '$CSV_FILE' ble ikke funnet. Kan ikke synkronisere."
-    exit 1
-fi
+die() { log "FEIL: $*"; exit 1; }
 
-# Funksjon for å kjøre kommandoer på fjernservere via SSH
+# Kjør kommando på fjernserver (forvent at sudo ikke krever passord for it_admin)
 execute_remote() {
-    local HOST=$1
-    shift
-    local COMMAND="$@"
-    
-    # Kjører kommandoen som root på fjernserveren 
-    ssh -o BatchMode=yes -T "$HOST" "sudo $COMMAND"
-    if [ $? -ne 0 ]; then
-        echo "Advarsel: Feil under kjøring av kommando på $HOST."
-    fi
+  local HOST=$1; shift
+  local COMMAND="$*"
+  if ! ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -T "$HOST" "sudo bash -lc '$COMMAND'"; then
+    log "Advarsel: Feil under kjøring på $HOST: $COMMAND"
+    return 1
+  fi
 }
 
-# --- LOKAL FUNKSJON  ---
-
-process_local_user() {
-    # 1. RENSE VARIABLER (CZYSZCZENIE ZMIENNYCH)
-    local CLEAN_FORNAVN=$(echo "$Fornavn" | tr -d '\r' | xargs)
-    local CLEAN_ETTERNAVN=$(echo "$Etternavn" | tr -d '\r' | xargs)
-    local BRUKERNAVN=$(echo "${CLEAN_FORNAVN,,}.${CLEAN_ETTERNAVN,,}" | tr -d ' ')
-    
-    local GRUPPE_RAW=$(echo "$Arbeidsomrade" | tr -d '\r')
-    local GRUPPE=$(echo "$GRUPPE_RAW" | iconv -f utf8 -t ascii//TRANSLIT | tr '[:upper:]' '[:lower:]' | tr -d '/ ' )
-    
-    local FULLT_NAVN="$CLEAN_FORNAVN $CLEAN_ETTERNAVN"
-    # Lagrer Fullt Navn, Telefon og Kontor i GECOS-feltet
-   
-    local GECOS_INFO="$FULLT_NAVN,$Telefon,$Kontor"
-
-    echo "--- Behandler bruker: $BRUKERNAVN (Gruppe: $GRUPPE) ---"
-
-    # 2. OPPRETT GRUPPE LOKALT (TWÓRZ GRUPĘ LOKALNIE)
-    # Kontrollerer om gruppen eksisterer, ellers opprettes den
-    
-    if ! getent group "$GRUPPE" > /dev/null; then
-        sudo groupadd "$GRUPPE"
-        echo "Opprettet gruppe: $GRUPPE"
-    fi
-
-    # 3. OPPRETT / OPPDATER BRUKER LOKALT 
-    if getent passwd "$BRUKERNAVN" > /dev/null; then
-        # Bruker eksisterer - oppdater GECOS og gruppe
-        
-        sudo usermod -c "$GECOS_INFO" -g "$GRUPPE" -s /bin/bash "$BRUKERNAVN"
-        echo "Oppdatert lokal bruker: $BRUKERNAVN"
-    else
-        # Bruker eksisterer ikke - opprett bruker
-        
-        sudo useradd -m -g "$GRUPPE" -c "$GECOS_INFO" -s /bin/bash "$BRUKERNAVN"
-        
-        if [ $? -eq 0 ]; then
-            # Setter passord og tvinger bytte 
-            echo "$BRUKERNAVN:$TEMP_PASSWORD" | sudo chpasswd
-            sudo chage -d 0 "$BRUKERNAVN"
-            echo "Opprettet lokal bruker: $BRUKERNAVN"
-        fi
-    fi
-
-    # 4. HENT UID OG GID (POBIERZ UID I GID)
-    local UID_VAL=$(id -u "$BRUKERNAVN")
-    local GID_VAL=$(id -g "$BRUKERNAVN")
-    local GRP_NAVN="$GRUPPE"
-
-    # 5. SYNCRONISER TIL FJERN-SERVERE 
-    for HOST in "${REMOTE_HOSTS[@]}"; do
-        sync_remote_user "$HOST" "$BRUKERNAVN" "$UID_VAL" "$GID_VAL" "$GRP_NAVN" "$GECOS_INFO"
-    done
+# Normaliser arbeidsområde til gruppenavn (ASCII, små bokstaver, ingen mellomrom)
+normalize_group() {
+  local RAW="$1"
+  echo "$RAW" | iconv -f utf8 -t ascii//TRANSLIT | tr '[:upper:]' '[:lower:]' | tr -d ' /'
 }
 
-# --- FJERN FUNKSJON  ---
+# --- VALIDERING AV INNGANG ---
+[[ -n "$CSV_FILE" ]] || die "Mangler CSV-fil som argument."
+[[ -f "$CSV_FILE" ]] || die "CSV-filen '$CSV_FILE' finnes ikke."
 
-sync_remote_user() {
-    local HOST=$1
-    local BRUKERNAVN=$2
-    local UID_VAL=$3
-    local GID_VAL=$4
-    local GRP_NAVN=$5
-    local GECOS_INFO=$6
-    
-    echo "  -> Synkroniserer $BRUKERNAVN til $HOST (UID:$UID_VAL GID:$GID_VAL)..."
-    
-    # 1. OPPRETT GRUPPE PÅ FJERN-SERVER 
-    
-    execute_remote "$HOST" "if ! getent group \"$GRP_NAVN\" > /dev/null; then groupadd -g \"$GID_VAL\" \"$GRP_NAVN\"; fi"
+# Fjern eventuelle CRLF fra Windows
+tr -d '\r' < "$CSV_FILE" > /tmp/nordfrakt_clean.csv && mv /tmp/nordfrakt_clean.csv "$CSV_FILE"
 
-    # 2. OPPRETT / OPPDATER BRUKER PÅ FJERN-SERVER 
-    if execute_remote "$HOST" "getent passwd \"$BRUKERNAVN\"" > /dev/null; then
-        # Bruker eksisterer - oppdater GECOS og gruppe (
-        execute_remote "$HOST" "usermod -c \"$GECOS_INFO\" -g \"$GRP_NAVN\" -s /bin/bash \"$BRUKERNAVN\""
-    else
-        # Bruker eksisterer ikke - opprett bruker 
-        # Bruk samme UID og GID som lokalt for konsistens
-        
-        execute_remote "$HOST" "useradd -m -u \"$UID_VAL\" -g \"$GRP_NAVN\" -c \"$GECOS_INFO\" -s /bin/bash \"$BRUKERNAVN\""
-    fi
+log "Starter sentralisert bruker-synkronisering basert på $CSV_FILE"
 
-    # 3. Passord settes kun på den lokale Tromsø-serveren. Passord-synkronisering over SSH er for komplisert og usikkert for Bash-skript.
-    
-    
-    echo "  -> Synkronisering til $HOST fullført."
-}
+# Samle ønsket tilstand fra CSV (brukernavn-liste) for senere deaktivering
+declare -A CSV_USERS=()
 
+# --- HOVEDLØKKE OVER CSV ---
+tail -n +2 "$CSV_FILE" | while IFS=, read -r Fornavn Etternavn Fodselsdato Arbeidsomrade Telefon Kontor; do
+  # Rens og bygg brukernavn
+  CLEAN_FORNAVN=$(echo "$Fornavn" | xargs)
+  CLEAN_ETTERNAVN=$(echo "$Etternavn" | xargs)
+  BRUKERNAVN=$(echo "${CLEAN_FORNAVN,,}.${CLEAN_ETTERNAVN,,}" | tr -d ' ')
+  GRUPPE=$(normalize_group "$Arbeidsomrade")
+  FULLT_NAVN="$CLEAN_FORNAVN $CLEAN_ETTERNAVN"
+  GECOS_INFO="$FULLT_NAVN,$Telefon,$Kontor"
 
-# --- HOVEDLØKKE  ---
+  CSV_USERS["$BRUKERNAVN"]=1
+  log "--- Behandler $BRUKERNAVN (gruppe: $GRUPPE) ---"
 
-echo "Starter sentralisert bruker-synkronisering..."
+  # Opprett gruppe lokalt hvis den mangler
+  if ! getent group "$GRUPPE" >/dev/null; then
+    groupadd "$GRUPPE"
+    log "Opprettet lokal gruppe: $GRUPPE"
+  fi
 
-# Skanner CSV-filen og behandler hver bruker
+  # Opprett/oppdater bruker lokalt
+  if getent passwd "$BRUKERNAVN" >/dev/null; then
+    usermod -c "$GECOS_INFO" -g "$GRUPPE" -s /bin/bash "$BRUKERNAVN"
+    log "Oppdatert lokal bruker: $BRUKERNAVN"
+  else
+    useradd -m -g "$GRUPPE" -c "$GECOS_INFO" -s /bin/bash "$BRUKERNAVN"
+    echo "$BRUKERNAVN:$TEMP_PASSWORD" | chpasswd
+    chage -d 0 "$BRUKERNAVN"  # Tvinger passordbytte ved første innlogging (kun lokalt)
+    log "Opprettet lokal bruker: $BRUKERNAVN"
+  fi
 
-tail -n +2 "$CSV_FILE" | while IFS=, read -r Fornavn Etternavn Fodselsdato Arbeidsomrade Telefon Kontor
-do
-    process_local_user
+  UID_VAL=$(id -u "$BRUKERNAVN")
+  GID_VAL=$(getent group "$GRUPPE" | cut -d: -f3)
+
+  # Synkroniser bruker og gruppe til fjernservere
+  # for HOST in "${REMOTE_HOSTS[@]}"; do
+  #   log "-> Synkroniserer $BRUKERNAVN til $HOST (UID:$UID_VAL GID:$GID_VAL)"
+  #   execute_remote "$HOST" "getent group '$GRUPPE' >/dev/null || groupadd -g '$GID_VAL' '$GRUPPE'"
+  #   if execute_remote "$HOST" "getent passwd '$BRUKERNAVN'"; then
+  #     execute_remote "$HOST" "usermod -c '$GECOS_INFO' -g '$GRUPPE' -s /bin/bash '$BRUKERNAVN'"
+  #   else
+  #     execute_remote "$HOST" "useradd -m -u '$UID_VAL' -g '$GRUPPE' -c '$GECOS_INFO' -s /bin/bash '$BRUKERNAVN'"
+  #   fi
+  #   # Passord synkroniseres ikke over nettverket av sikkerhetshensyn – lokal første-innlogging på Tromsø håndterer det.
+  #   log "-> Ferdig synk for $BRUKERNAVN på $HOST"
+  # done
 done
 
-echo "Synkronisering fullført for alle brukere og servere. (Sletting av brukere krever separat logikk.)"
+# --- DEAKTIVERING AV BRUKERE SOM IKKE LENGER STÅR I CSV ---
+log "Kontrollerer brukere for deaktivering (ikke i CSV)"
+for USER in $(awk -F: '{if ($3>=1000 && $1!="nobody") print $1}' /etc/passwd); do
+  # Hopp over it_admin-brukere og systemkonti
+  if id "$USER" >/dev/null 2>&1 && id -nG "$USER" | grep -qw it_admin; then
+    continue
+  fi
+  if [[ -z "${CSV_USERS[$USER]:-}" ]]; then
+    # Deaktiver lokalt
+    usermod --expiredate 1 "$USER"
+    log "Deaktivert lokal bruker: $USER (mangler i CSV)"
+    # Deaktiver på fjernservere
+    for HOST in "${REMOTE_HOSTS[@]}"; do
+      execute_remote "$HOST" "id '$USER' >/dev/null 2>&1 && usermod --expiredate 1 '$USER' && echo 'Deaktivert $USER på $HOST'"
+    done
+  fi
+done
+
+log "Synkronisering fullført."
