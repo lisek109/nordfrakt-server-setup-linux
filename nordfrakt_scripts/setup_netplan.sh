@@ -32,5 +32,6 @@ EOL
 sudo chmod 600 "$NETPLAN_FILE"
 
 echo "Statisk IP er konfigurert til $IP med gateway $GATEWAY og DNS $DNS."
-echo "Bruk 'sudo netplan apply' for å aktivere endringen."
+#  Aktiverer de nye Netplan-innstillingene umiddelbart
+sudo netplan apply
 exit 0

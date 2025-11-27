@@ -1,0 +1,24 @@
+---
+- name: Disable password authentication on Harstad
+  hosts: harstad
+  become: yes
+  tasks:
+    - name: Set PasswordAuthentication to no
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PasswordAuthentication (yes|no)'
+        line: 'PasswordAuthentication no'
+      notify: restart ssh
+
+    - name: Ensure HostbasedAuthentication is set to no
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?HostbasedAuthentication (yes|no)'
+        line: 'HostbasedAuthentication no'
+      notify: restart ssh
+
+  handlers:
+    - name: restart ssh
+      service:
+        name: ssh
+        state: restarted

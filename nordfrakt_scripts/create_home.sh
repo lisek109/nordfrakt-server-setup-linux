@@ -14,5 +14,5 @@ sudo mkdir -p "$HOMEDIR"
 sudo chown "$BRUKER:$BRUKER" "$HOMEDIR"
 sudo chmod 700 "$HOMEDIR"
 
-echo "✅ Hjemmeområde $HOMEDIR opprettet for bruker $BRUKER."
+echo "Hjemmeområde $HOMEDIR opprettet for bruker $BRUKER."
 exit 0

@@ -1,0 +1,52 @@
+---
+- name: 01 - Sett opp systemkonfigurasjon og sikkerhet på arbeidsstasjoner
+  hosts: workstations # : Målrett mot alle servere i gruppen (Harstad, Bodo).
+  gather_facts: yes
+  become: yes # : Kjør alle oppgaver med sudo.
+  
+  vars:
+    # : Definer målmappen for skript på fjernserveren.
+    SCRIPT_DIR: /usr/local/bin/nordfrakt
+    
+  tasks:
+    # --- STEG 1: OPPSETT AV MILJØ OG KOPIERING ---
+    
+    # : Sørg for at målmappen eksisterer på fjernserveren.
+    - name: 1.1 Opprett skriptmappen
+      file:
+        path: "{{ SCRIPT_DIR }}"
+        state: directory
+        mode: '0755'
+        
+    # : Kopier alle essensielle konfigurasjonsskript til målmappen.
+    # sync_users.sh og disable_users.sh kopieres IKKE hit, da de kun skal kjøres fra Tromsø.
+    - name: 1.2 Kopier system- og sikkerhetsskript
+      copy:
+        src: "../nordfrakt_scripts/{{ item }}" 
+        dest: "{{ SCRIPT_DIR }}/{{ item }}"
+        mode: '0755'
+      loop:
+        - install_packages.sh
+        - setup_motd.sh
+        - setup_security.sh
+        - setup_netplan.sh
+
+    # --- STEG 2: KJØRING AV KONFIGURASJONSSKRIPTER ---
+
+    # : Kjør Netplan-konfigurasjon med variabler fra Inventory (ipv4_address, netmask, gateway_address).
+    - name: 2.1 Kjør Netplan konfigurasjon (setup_netplan.sh)
+      command: "{{ SCRIPT_DIR }}/setup_netplan.sh {{ ipv4_address }}/{{ netmask }} {{ gateway_address }} 8.8.8.8"
+      
+    # : Installer basispakker.
+    - name: 2.2 Installer basispakker (install_packages.sh)
+      command: "{{ SCRIPT_DIR }}/install_packages.sh"
+      
+    # : Sett opp sikkerhet (ufw, fail2ban, etc.).
+    - name: 2.3 Kjør sikkerhetsoppsett (setup_security.sh)
+      command: "{{ SCRIPT_DIR }}/setup_security.sh"
+      
+    # : Sett opp MOTD (bruker $(hostname) og trenger ingen argumenter).
+    - name: 2.4 Sett opp MOTD (setup_motd.sh)
+      command: "{{ SCRIPT_DIR }}/setup_motd.sh"
+      
+   

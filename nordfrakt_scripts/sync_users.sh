@@ -2,39 +2,39 @@
 # sync_users.sh
 # Hovedskript for synkronisering av brukere og grupper på tvers av servere.
 
-
-# --- KONFIGURASJON (KONFIGURACJA) ---
-CSV_FILE="$1"
-
+# --- KONFIGURASJON  ---
+CSV_FILES=("$@")
 # Liste over fjernservere Bruk hostname eller IP.
-REMOTE_HOSTS=("harstad_server" "bodo_server")
+REMOTE_HOSTS=("server-harstad" "server-bodo")
 TEMP_PASSWORD="Velkommen2025!" # Midlertidig passord 
 
 # Sjekk om CSV-filen eksisterer 
-if [ -f "$CSV_FILE" ]; then
-    tr -d '\r' < "$CSV_FILE" > /tmp/temp_clean.csv && mv /tmp/temp_clean.csv "$CSV_FILE"
-else
-    echo "Feil: CSV-filen '$CSV_FILE' ble ikke funnet. Kan ikke synkronisere."
+if [ "${#CSV_FILES[@]}" -eq 0 ]; then
+    echo "Feil: Ingen CSV-filer oppgitt. Bruk: $0 <fil1.csv> [fil2.csv] ..."
     exit 1
 fi
 
-# Funksjon for å kjøre kommandoer på fjernservere via SSH
+#  Funksjon for å kjøre kommandoer på fjernservere via SSH
 execute_remote() {
     local HOST=$1
     shift
     local COMMAND="$@"
     
-    # Kjører kommandoen som root på fjernserveren 
-    ssh -o BatchMode=yes -T "$HOST" "sudo $COMMAND"
+    # Kjører kommandoen som root på fjernserveren.
+    ssh -o BatchMode=yes -T -n "$HOST" "sudo bash -c '$COMMAND'"
+
+    
+    #  Sjekker KUN for kritisk feil i SSH-forbindelsen, ikke kommandoens feil.
     if [ $? -ne 0 ]; then
-        echo "Advarsel: Feil under kjøring av kommando på $HOST."
+        #  Viktig advarsel om at hele SSH-økten mislyktes.
+        echo "Advarsel: Kritisk feil med SSH-forbindelse eller ekstern Bash-feil på $HOST."
     fi
 }
 
 # --- LOKAL FUNKSJON  ---
 
 process_local_user() {
-    # 1. RENSE VARIABLER (CZYSZCZENIE ZMIENNYCH)
+    # 1. RENSE VARIABLER 
     local CLEAN_FORNAVN=$(echo "$Fornavn" | tr -d '\r' | xargs)
     local CLEAN_ETTERNAVN=$(echo "$Etternavn" | tr -d '\r' | xargs)
     local BRUKERNAVN=$(echo "${CLEAN_FORNAVN,,}.${CLEAN_ETTERNAVN,,}" | tr -d ' ')
@@ -49,7 +49,7 @@ process_local_user() {
 
     echo "--- Behandler bruker: $BRUKERNAVN (Gruppe: $GRUPPE) ---"
 
-    # 2. OPPRETT GRUPPE LOKALT (TWÓRZ GRUPĘ LOKALNIE)
+    # 2. OPPRETT GRUPPE LOKALT 
     # Kontrollerer om gruppen eksisterer, ellers opprettes den
     
     if ! getent group "$GRUPPE" > /dev/null; then
@@ -76,7 +76,7 @@ process_local_user() {
         fi
     fi
 
-    # 4. HENT UID OG GID (POBIERZ UID I GID)
+    # 4. HENT UID OG GID 
     local UID_VAL=$(id -u "$BRUKERNAVN")
     local GID_VAL=$(id -g "$BRUKERNAVN")
     local GRP_NAVN="$GRUPPE"
@@ -98,38 +98,28 @@ sync_remote_user() {
     local GECOS_INFO=$6
     
     echo "  -> Synkroniserer $BRUKERNAVN til $HOST (UID:$UID_VAL GID:$GID_VAL)..."
-    
-    # 1. OPPRETT GRUPPE PÅ FJERN-SERVER 
-    
-    execute_remote "$HOST" "if ! getent group \"$GRP_NAVN\" > /dev/null; then groupadd -g \"$GID_VAL\" \"$GRP_NAVN\"; fi"
+    execute_remote "$HOST" "groupadd -f -g \"$GID_VAL\" \"$GRP_NAVN\""
 
-    # 2. OPPRETT / OPPDATER BRUKER PÅ FJERN-SERVER 
-    if execute_remote "$HOST" "getent passwd \"$BRUKERNAVN\"" > /dev/null; then
-        # Bruker eksisterer - oppdater GECOS og gruppe (
-        execute_remote "$HOST" "usermod -c \"$GECOS_INFO\" -g \"$GRP_NAVN\" -s /bin/bash \"$BRUKERNAVN\""
+    if ssh -o BatchMode=yes -T -n "$HOST" "sudo getent passwd \"$BRUKERNAVN\"" > /dev/null 2>&1; then
+        execute_remote "$HOST" "usermod -c \"$GECOS_INFO\" -g \"$GRP_NAVN\" -s /bin/bash $BRUKERNAVN"
+        echo "  -> Oppdatert $BRUKERNAVN"
+
     else
-        # Bruker eksisterer ikke - opprett bruker 
-        # Bruk samme UID og GID som lokalt for konsistens
-        
-        execute_remote "$HOST" "useradd -m -u \"$UID_VAL\" -g \"$GRP_NAVN\" -c \"$GECOS_INFO\" -s /bin/bash \"$BRUKERNAVN\""
-    fi
-
-    # 3. Passord settes kun på den lokale Tromsø-serveren. Passord-synkronisering over SSH er for komplisert og usikkert for Bash-skript.
-    
-    
+        execute_remote "$HOST" "useradd -m -u $UID_VAL -g \"$GRP_NAVN\" -c \"$GECOS_INFO\" -s /bin/bash $BRUKERNAVN"
+        echo "  -> Opprettet $BRUKERNAVN"
+    fi  
     echo "  -> Synkronisering til $HOST fullført."
 }
 
-
 # --- HOVEDLØKKE  ---
 
-echo "Starter sentralisert bruker-synkronisering..."
-
-# Skanner CSV-filen og behandler hver bruker
-
-tail -n +2 "$CSV_FILE" | while IFS=, read -r Fornavn Etternavn Fodselsdato Arbeidsomrade Telefon Kontor
-do
-    process_local_user
+for FILE in "${CSV_FILES[@]}"; do
+    if [ -f "$FILE" ]; then
+        echo "Behandler fil: $FILE"
+        tr -d '\r' < "$FILE" | tail -n +2 | while IFS=, read -r Fornavn Etternavn Fodselsdato Arbeidsomrade Telefon Kontor
+        do
+            process_local_user
+        done
+    fi
 done
 
-echo "Synkronisering fullført for alle brukere og servere. (Sletting av brukere krever separat logikk.)"
